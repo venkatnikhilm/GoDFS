@@ -30,11 +30,18 @@ message blockData{
 message fileBlockMetadata{
     string filePath = 1;
     repeated string blockIDs= 2;
+    repeated blockMetadata blocks = 3;
 }
 
 message blockDataNode{
     string blockID = 1;
     repeated datanodeData DataNodeIDs = 2;
+    string checksum = 3;
+}
+
+message blockMetadata{
+    string blockID = 1;
+    string checksum = 2;
 }
 
 message status{

@@ -12,6 +12,7 @@ A distributed file system inspired by Hadoop HDFS, built with Go and gRPC. GoDFS
 - [Prerequisites](#prerequisites)
 - [Installation](#installation)
 - [Usage](#usage)
+- [Reliability Demo](#reliability-demo)
 - [Configuration](#configuration)
 - [API Reference](#api-reference)
 - [Docker Support](#docker-support)
@@ -63,6 +64,8 @@ GoDFS is a distributed file system designed to handle large files by splitting t
 ### 2. Fault Tolerance
 - **Replication**: Each block is replicated 3 times (configurable) across different DataNodes
 - **Block Reports**: DataNodes send periodic heartbeats (every 10 seconds) to the NameNode
+- **Self-Healing Replication**: NameNode marks stale DataNodes as dead and re-replicates under-replicated blocks
+- **Checksum Validation**: Clients verify block checksums and fall back to other replicas on mismatch
 - **Metadata Redundancy**: NameNode maintains comprehensive metadata about all blocks and their locations
 
 ### 3. High Performance
@@ -355,6 +358,67 @@ DataNodes send block reports every 10 seconds. To modify:
 interval := 10 * time.Second  // Adjust this value
 ```
 
+## Reliability Demo
+
+### 1) Checksum fallback demo
+
+This proves that corrupted replicas are rejected and healthy replicas are used automatically.
+
+```bash
+# baseline
+./go-dfs client -namenode 8080 -operation write -source-path . -filename test.txt
+./go-dfs client -namenode 8080 -operation read -source-path . -filename test.txt > read_ok.txt
+diff -u test.txt read_ok.txt
+
+# pick one block ID and list replicas
+BLOCK="your-block-id.txt"
+find custom-dn-storage -type f -name "$BLOCK"
+
+# corrupt two replicas (leave one healthy)
+echo "CORRUPTED" >> "custom-dn-storage/<uuid1>/$BLOCK"
+echo "CORRUPTED" >> "custom-dn-storage/<uuid2>/$BLOCK"
+
+# read still succeeds via fallback
+./go-dfs client -namenode 8080 -operation read -source-path . -filename test.txt > read_after_corrupt.txt
+diff -u test.txt read_after_corrupt.txt
+```
+
+Expected result:
+- Diff output is empty (file content still matches).
+- Client may log checksum mismatch for bad replicas.
+
+### 2) Automatic re-replication demo
+
+This proves dead DataNodes are detected and blocks are re-replicated automatically.
+
+```bash
+# start namenode + 4 datanodes
+./go-dfs namenode -port 8080 -block-size 32
+./go-dfs datanode -port 8001 -location ./custom-dn-storage
+./go-dfs datanode -port 8002 -location ./custom-dn-storage
+./go-dfs datanode -port 8003 -location ./custom-dn-storage
+./go-dfs datanode -port 8004 -location ./custom-dn-storage
+
+# write data
+./go-dfs client -namenode 8080 -operation write -source-path . -filename test.txt
+```
+
+Then stop one DataNode process (Ctrl+C), wait ~30 seconds, and check NameNode logs.
+
+Expected logs:
+- `Marked datanode ... as Dead (heartbeat timeout)`
+- `Re-replicated block ... from ... to ...`
+
+Final validation:
+
+```bash
+./go-dfs client -namenode 8080 -operation read -source-path . -filename test.txt > read_after_rerep.txt
+diff -u test.txt read_after_rerep.txt
+```
+
+Expected result:
+- Diff output is empty after the node failure and re-replication.
+
 ## API Reference
 
 ### NameNode gRPC Services
@@ -469,18 +533,14 @@ GoDFS-main/
 ### Known Limitations
 
 1. **Single NameNode**: No NameNode redundancy (single point of failure)
-2. **No Failure Recovery**: DataNode failures are detected but not automatically handled
-3. **Limited Error Handling**: Uses panic instead of graceful error recovery
-4. **Hardcoded Values**: Block size and replication factor are not fully configurable
-5. **No Authentication**: No security or access control mechanisms
-6. **Memory Constraints**: Entire blocks are loaded into memory during transfers
-7. **No Data Integrity Checks**: No checksums or data validation
+2. **Limited Error Handling**: Uses panic in several paths instead of graceful error recovery
+3. **Hardcoded Values**: Block size and replication factor are not fully configurable
+4. **No Authentication**: No security or access control mechanisms
+5. **Memory Constraints**: Entire blocks are loaded into memory during transfers
 
 ### Future Enhancements
 
 - [ ] Implement secondary NameNode for high availability
-- [ ] Add automatic block replication on DataNode failure
-- [ ] Implement data integrity checks (checksums)
 - [ ] Add authentication and authorization
 - [ ] Support for larger files with streaming
 - [ ] Web UI for cluster monitoring
