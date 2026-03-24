@@ -11,6 +11,8 @@ import (
 	"github.com/Raghav-Tiruvallur/GoDFS/utils"
 	"github.com/golang/protobuf/ptypes/empty"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type DataNodeMetadata struct {
@@ -81,6 +83,18 @@ func (nameNode *NameNodeData) GetAvailableDatanodes(ctx context.Context, empty *
 	sort.SliceStable(availableDataNodes, func(i, j int) bool {
 		return availableDataNodes[i].BlockCount < availableDataNodes[j].BlockCount
 	})
+
+	availableCount := len(availableDataNodes)
+	requiredCount := int(nameNode.ReplicationFactor)
+	if availableCount < requiredCount {
+		return nil, status.Errorf(
+			codes.FailedPrecondition,
+			"insufficient datanodes: need %d, available %d",
+			requiredCount,
+			availableCount,
+		)
+	}
+
 	for i := 0; i < int(nameNode.ReplicationFactor); i++ {
 		freeDataNode := &namenode.DatanodeData{DatanodeID: availableDataNodes[i].DataNodeData.DatanodeID, DatanodePort: availableDataNodes[i].DataNodeData.DatanodePort}
 		freeDataNodes = append(freeDataNodes, freeDataNode)

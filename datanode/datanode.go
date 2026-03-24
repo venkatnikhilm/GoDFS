@@ -2,7 +2,6 @@ package datanode
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net"
 	"os"
@@ -14,7 +13,9 @@ import (
 	"github.com/Raghav-Tiruvallur/GoDFS/utils"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 type DataNode struct {
@@ -92,11 +93,15 @@ func (datanode *DataNode) SendBlockReportToNameNode(conn *grpc.ClientConn) {
 func (datanode *DataNode) ReadBytesFromDataNode(ctx context.Context, blockRequest *datanodeService.BlockRequest) (*datanodeService.ByteResponse, error) {
 
 	blockID := blockRequest.BlockID
-	blockDirectory := fmt.Sprintf("./datanode-files/%s", datanode.ID)
-	filePath := filepath.Join(blockDirectory, blockID+".txt")
+	filePath := filepath.Join(datanode.DataNodeLocation, blockID+".txt")
 	log.Println(filePath)
 	content, err := os.ReadFile(filePath)
-	utils.ErrorHandler(err)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, status.Errorf(codes.NotFound, "block %s not found", blockID)
+		}
+		return nil, status.Errorf(codes.Internal, "failed to read block %s: %v", blockID, err)
+	}
 	return &datanodeService.ByteResponse{FileContent: content}, nil
 }
 

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -17,7 +18,9 @@ import (
 	"github.com/Raghav-Tiruvallur/GoDFS/utils"
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
@@ -72,11 +75,14 @@ func ThreadDone(done chan Pair[int, string], blockID string, idx int) {
 
 	done <- Pair[int, string]{first: idx, second: blockID}
 }
-func SendData(dataNodeID string, datanodePort string, done chan Pair[int, string], blockID string, buffer []byte, n int, idx int) {
+func SendData(dataNodeID string, datanodePort string, blockID string, buffer []byte, n int) error {
 	clientDataNodeRequest := &datanodeService.ClientToDataNodeRequest{BlockID: blockID, Content: buffer[:n]}
 	datanodeClient := GetDataNodeStub(datanodePort)
-	_, _ = datanodeClient.SendDataToDataNodes(context.Background(), clientDataNodeRequest)
-	ThreadDone(done, blockID, idx)
+	_, err := datanodeClient.SendDataToDataNodes(context.Background(), clientDataNodeRequest)
+	if err != nil {
+		return fmt.Errorf("failed to send block %s to datanode %s: %w", blockID, dataNodeID, err)
+	}
+	return nil
 
 }
 
@@ -101,16 +107,30 @@ func (client *ClientData) ProcessData(conn *grpc.ClientConn, blockSize int, done
 	}
 	utils.ErrorHandler(err)
 	freeDataNodes, err := client.GetAvailableDatanodes(conn)
-	utils.ErrorHandler(err)
+	if err != nil {
+		log.Printf("failed to fetch available datanodes for block %d: %v", idx, err)
+		return
+	}
 	wg2 := &sync.WaitGroup{}
+	replicationErrCh := make(chan error, len(freeDataNodes.DataNodeIDs))
 	for _, datanode := range freeDataNodes.DataNodeIDs {
 		wg2.Add(1)
 		go func(datanode *namenodeService.DatanodeData) {
 			defer wg2.Done()
-			SendData(datanode.DatanodeID, datanode.DatanodePort, done, blockID, buffer, n, idx)
+			if err := SendData(datanode.DatanodeID, datanode.DatanodePort, blockID, buffer, n); err != nil {
+				replicationErrCh <- err
+			}
 		}(datanode)
 	}
 	wg2.Wait()
+	close(replicationErrCh)
+
+	for replicationErr := range replicationErrCh {
+		log.Printf("block replication failed for block %s (index %d): %v", blockID, idx, replicationErr)
+		return
+	}
+
+	ThreadDone(done, blockID, idx)
 }
 
 func (client *ClientData) SendFileBlockMappingToNameNode(filePath string, blockIDs []string) {
@@ -125,6 +145,18 @@ func (client *ClientData) SendFileBlockMappingToNameNode(filePath string, blockI
 func (client *ClientData) WriteFile(conn *grpc.ClientConn, sourcePath string, fileName string) {
 
 	filePath := filepath.Join(sourcePath, fileName)
+	freeDataNodes, err := client.GetAvailableDatanodes(conn)
+	if err != nil {
+		if st, ok := status.FromError(err); ok && st.Code() == codes.FailedPrecondition {
+			log.Printf("write aborted: %s", st.Message())
+			return
+		}
+		utils.ErrorHandler(err)
+	}
+	if len(freeDataNodes.DataNodeIDs) == 0 {
+		log.Println("write aborted: no datanodes available")
+		return
+	}
 
 	blockSize := int(3 * 1024)
 	fileSizeHandler, err := os.Stat(filePath)
@@ -167,7 +199,14 @@ func (client *ClientData) WriteFile(conn *grpc.ClientConn, sourcePath string, fi
 
 	sortedblockIDs := make([]Pair[int, string], 0)
 	for i := 0; i < numberOfBlocks; i++ {
-		sortedblockIDs = append(sortedblockIDs, <-done)
+		block, ok := <-done
+		if !ok {
+			break
+		}
+		sortedblockIDs = append(sortedblockIDs, block)
+	}
+	if len(sortedblockIDs) != numberOfBlocks {
+		utils.ErrorHandler(errors.New("write failed: one or more blocks were not uploaded"))
 	}
 	for _, block := range sortedblockIDs {
 		fmt.Printf("Before = %d\n", block.first)
@@ -202,7 +241,7 @@ func (client *ClientData) ReadFile(conn *grpc.ClientConn, source string, fileNam
 		blockRequest := &datanodeService.BlockRequest{BlockID: blockID}
 		blockResponse, err := dataNodeClient.ReadBytesFromDataNode(context.Background(), blockRequest)
 		utils.ErrorHandler(err)
-		log.Println(string(blockResponse.FileContent))
+		fmt.Print(string(blockResponse.FileContent))
 	}
 
 }
